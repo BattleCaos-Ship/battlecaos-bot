@@ -1,7 +1,11 @@
 import 'dotenv/config';
 import { producer, createConsumer } from './kafka.js';
 import { log } from './logger.js';
+import { startObservability, conCorrelation, correlationActual, instrumentar , trackConsumer} from './observability.js';
 import { estadoDesdeTablero, decidirDisparo } from './strategy.js';
+
+// El bot no usa Redis; /health solo reporta que el proceso vive (redis=null → ok).
+startObservability({ port: process.env.OBS_PORT ?? 9100, redis: null });
 
 const BOT_ID = 'bot';
 const BOT_DELAY_MS = parseInt(process.env.BOT_DELAY_MS ?? '800');
@@ -18,19 +22,22 @@ log.info('kafka producer conectado');
 // El bot se alimenta del ESTADO PÚBLICO del juego (gw.broadcast): de ahí saca su energía, su
 // escudo, y el tablero enemigo. Así decide disparos Y poderes con información autoritativa.
 const consumer = createConsumer('bot-group');
+  trackConsumer(consumer); // salud del consumer -> kafka_consumer_up + /health
 await consumer.connect();
 await consumer.subscribe({ topics: ['gw.broadcast'], fromBeginning: false });
 log.info('suscrito a gw.broadcast');
 
 await consumer.run({
   eachMessage: async ({ message }) => {
-    try {
-      const msg = JSON.parse(message.value.toString());
-      if (msg.event !== 'game:state') return;
-      procesarEstado(msg.payload);
-    } catch (err) {
-      log.error('mensaje no procesado —', err.message);
-    }
+    const msg = JSON.parse(message.value.toString());
+    if (msg.event !== 'game:state') return;
+    await conCorrelation(msg.correlationId, async () => {
+      try {
+        await instrumentar('game:state', async () => procesarEstado(msg.payload))();
+      } catch (err) {
+        log.error(`mensaje no procesado — ${err.message} [cid=${correlationActual()}]`);
+      }
+    });
   },
 });
 
@@ -103,6 +110,6 @@ async function actuar(codigo, s, bot) {
 async function emitir(type, codigo, data) {
   await producer.send({
     topic:    'evt.bot',
-    messages: [{ key: codigo, value: JSON.stringify({ type, source: 'bot', timestamp: Date.now(), data }) }],
+    messages: [{ key: codigo, value: JSON.stringify({ type, source: 'bot', timestamp: Date.now(), version: 1, correlationId: correlationActual(), data }) }],
   });
 }

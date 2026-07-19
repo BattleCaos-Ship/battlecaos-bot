@@ -1,10 +1,17 @@
 import pino from 'pino';
+import { correlationActual } from './correlation.js';
 
 const usePretty = process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test';
 
 const _pino = pino({
-  name: 'bot',
+  name: process.env.SERVICE_NAME ?? 'servicio',
   level: process.env.LOG_LEVEL ?? 'info',
+  // Inyecta el correlationId (cid) en CADA línea de log — incluso las de éxito —
+  // para poder seguir un evento end-to-end por todos los servicios con un grep.
+  mixin() {
+    const cid = correlationActual();
+    return cid ? { cid } : {};
+  },
   ...(usePretty && {
     transport: {
       target: 'pino-pretty',
